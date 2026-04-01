@@ -1,6 +1,6 @@
 # Vortex: Medical Insurance Risk Segmentation & Cost Prediction
 
-> Pipeline completo de Machine Learning para segmentación de asegurados por perfil de riesgo médico (K-Means) y predicción del costo de cobertura (Regresión Lineal), aplicado al dataset Medical Insurance Cost de Kaggle.
+> Pipeline completo de Machine Learning para segmentación de asegurados por perfil de riesgo médico (K-Means) y predicción del costo de cobertura (XGBoost), aplicado al dataset Medical Insurance Cost de Kaggle.
 
 ---
 
@@ -26,7 +26,7 @@
 Este proyecto aborda dos preguntas complementarias que en la práctica actuarial se usan de forma secuencial:
 
 1. **Segmentación:** ¿Qué perfiles de riesgo existen naturalmente en la cartera de clientes? → K-Means Clustering
-2. **Predicción:** ¿Cuánto costará cubrir a un nuevo asegurado antes de su incorporación? → Regresión Lineal
+2. **Predicción:** ¿Cuánto costará cubrir a un nuevo asegurado antes de su incorporación? → Regresión Lineal como baseline, XGBoost como modelo final
 
 La combinación de ambos enfoques permite a una aseguradora tomar decisiones concretas sobre **pricing de primas**, **estrategia de adquisición de clientes** y **gestión de riesgo de cartera**.
 
@@ -65,7 +65,9 @@ La combinación de ambos enfoques permite a una aseguradora tomar decisiones con
 | `numpy` | Operaciones numéricas y transformación logarítmica |
 | `matplotlib` | Construcción base de visualizaciones |
 | `seaborn` | Histogramas, scatter plots, heatmaps estadísticos |
-| `scikit-learn` | StandardScaler, KMeans, LinearRegression, train_test_split, métricas |
+| `scikit-learn` | StandardScaler, KMeans, LinearRegression, train_test_split, métricas, K-Fold CV |
+| `xgboost` | Modelo de gradient boosting para predicción no lineal de costos |
+| `shap` | Explicabilidad de predicciones individuales del modelo |
 | `joblib` | Serialización y persistencia de modelos entrenados (`.pkl`) |
 
 ---
@@ -158,7 +160,7 @@ df_insurance['segmento_riesgo'] = kmeans.labels_
 
 ---
 
-### Etapa 3: Predicción de Costo con Regresión Lineal
+### Etapa 3: Predicción de Costo con Regresión Lineal (baseline)
 
 **Variables input:** `age`, `bmi`, `smoker` | **Variable objetivo:** `charges`
 **Split:** 80% entrenamiento (1,070 registros) / 20% prueba (268 registros)
@@ -185,21 +187,17 @@ Se exploró `np.log(charges)` como variable objetivo para mitigar el sesgo a la 
 
 ### Etapa 4: Mejora del Modelo con XGBoost
 
-**Variables input:** `age`, `bmi`, `smoker` | **Variable objetivo:** `charges`
-**Split:** 80% entrenamiento (1,070 registros) / 20% prueba (268 registros)
+Dada la limitación de la regresión lineal para capturar la relación no lineal entre `smoker` y `charges`, se implementó **XGBoost Regressor**, un algoritmo de gradient boosting que entrena árboles de decisión secuencialmente, donde cada árbol corrige los errores del anterior.
 
-Dada la limitación de la regresión lineal para capturar la relación no lineal entre `smoker` y `charges`, se implementó **XGBoost Regressor**, un algoritmo basado en gradient boosting que entrena árboles de decisión secuencialmente, donde cada árbol corrige los errores del anterior.
-
-**Modelos entrenados:**
+Se entrenaron tres configuraciones progresivas para encontrar el balance entre capacidad y generalización:
 
 1. **XGBoost Base:** Configuración por defecto (n_estimators=100, max_depth=6)
-2. **XGBoost Ajustado (v1):** Balance entre capacidad y generalización (n_estimators=500, max_depth=4, learning_rate=0.05)
-3. **XGBoost Ajustado (v2):** Mayor regularización para datasets pequeños (n_estimators=1000, max_depth=5, learning_rate=0.01, subsample=0.8, colsample_bytree=0.8)
+2. **XGBoost Ajustado v1:** Balance entre capacidad y generalización (n_estimators=500, max_depth=4, learning_rate=0.05)
+3. **XGBoost Ajustado v2:** Mayor regularización para datasets pequeños (n_estimators=1000, max_depth=5, learning_rate=0.01, subsample=0.8, colsample_bytree=0.8)
 
 ```python
 from xgboost import XGBRegressor
 
-# Modelo XGBoost Ajustado v2 (mejor desempeño)
 model_xgb = XGBRegressor(
     n_estimators=1000,
     max_depth=5,
@@ -232,25 +230,46 @@ y_pred_xgb = model_xgb.predict(X_test)
 | **MAE** | $4,260 | $2,957 | **$2,652** |
 | **RMSE** | $5,874 | $5,226 | **$4,642** |
 
-**Análisis de mejora:**
+XGBoost v2 reduce el error promedio en 37.7% y el RMSE en 21% respecto a regresión lineal. El 14% de varianza residual no explicada corresponde al error irreducible: variables clínicas ausentes del dataset (historial médico, medicamentos crónicos, condiciones genéticas) que son estándar en sistemas actuariales.
 
-XGBoost mejoró significativamente el desempeño respecto a regresión lineal:
-- **R² mejoró en +0.09** (de 0.77 a 0.86): explicación de varianza 11.7% más alta
-- **RMSE se redujo en $1,232** (de $5,874 a $4,642): error cuadrático 21% menor
-- **MAE se redujo en $1,608** (de $4,260 a $2,652): error promedio 37.7% menor
+**Modelo seleccionado:** XGBoost Ajustado (v2).
 
-**Limitación de mejora:**
+### Importancia de Features
 
-El 14% de variación residual no explicada incluso por XGBoost (1 - R²=0.14) está determinado por el **error irreducible (ε)** — variables clínicas relevantes ausentes del dataset: historial médico, medicamentos crónicos, cirugías previas, condiciones genéticas. Estos factores son estándar en sistemas de información actuarial y podrían explicar el gap remanente.
+XGBoost calcula la importancia de cada variable mediante **Gain**: reducción promedio de pérdida cuando la variable participa en una división del árbol.
 
-**Modelo seleccionado:** XGBoost Ajustado (v2) con hiperparámetros optimizados para evitar overfitting en datasets de tamaño medio.
+| Variable | Importancia | Interpretación |
+|----------|------------|----------------|
+| `smoker` | **Alta** | Variable dominante; factor de riesgo más crítico |
+| `age` | **Media** | Correlación con costo, subordinada a tabaquismo |
+| `bmi` | **Baja a media** | Correlación débil directa; interacción relevante con `smoker` |
 
-**Hiperparámetros finales:**
-- `n_estimators=1000`: cantidad de árboles
-- `max_depth=5`: profundidad máxima de cada árbol
-- `learning_rate=0.01`: tasa de aprendizaje (shrinkage)
-- `subsample=0.8`: fracción de muestras usadas por árbol (reduce overfitting)
-- `colsample_bytree=0.8`: fracción de features usadas por árbol (aumenta diversidad)
+`smoker` tiene mayor peso que `age` y `bmi` combinadas, alineado con la correlación de 0.79 observada en el EDA.
+
+![Feature Importance: XGBoost Model](images/09_feature_importance.png)
+
+### Explicabilidad: SHAP Values
+
+**SHAP (SHapley Additive exPlanations)** explica por qué el modelo hizo una predicción específica para cada cliente, más allá de la importancia global.
+
+- **Puntos rojos** (valor alto de la variable): incrementan el costo predicho
+- **Puntos azules** (valor bajo de la variable): lo disminuyen
+- **Eje X:** impacto SHAP en la predicción final
+
+Para `smoker`: los fumadores (rojo) se agrupan claramente a la derecha y los no fumadores (azul) a la izquierda, mostrando una separación limpia que confirma su rol dominante. Para `age` y `bmi`: la nube es más dispersa, reflejando una contribución más gradual y subordinada.
+
+Esta visualización es crítica para confianza operacional: en seguros, la explicabilidad ante reguladores y clientes es tan importante como la precisión.
+
+![SHAP Values: Feature Impact on Model Output](images/10_shap_values.png)
+
+### Validación Cruzada (5-Fold Cross-Validation)
+
+Para evitar dependencia de un único test set de 268 muestras, se implementó **5-Fold Cross-Validation**:
+
+- R² promedio esperado: ~0.85-0.86 (consistente con el split 80/20)
+- Desviación estándar baja (< 0.05): indica modelo estable y sin overfitting pronunciado
+
+En lugar de un único "R²=0.86 en test set", obtenemos un intervalo de confianza que hace la estimación más honesta para decisiones en producción.
 
 ---
 
@@ -272,13 +291,7 @@ El clustering identificó tres perfiles con diferencias de costo de hasta 6x ent
 
 **Sí, con capacidad explicativa del 86% usando solo tres variables. XGBoost es apto para decisiones de pricing con ciertas consideraciones.**
 
-El modelo XGBoost explica el 86% de la variación en costos con un error promedio de $2,652 y RMSE de $4,642. Este RMSE representa el 35% del costo promedio de $13,270, una mejora significativa respecto a regresión lineal (44%). El modelo es ahora suficientemente preciso para:
-
-- **Estimación de primas de seguros:** El error de ±$4,642 es tolerable en un pricing de cartera (segmentación por riesgo)
-- **Evaluación de siniestralidad esperada:** Útil para capital setting y reservas actuariales
-- **Decisiones de aceptación/rechazo:** En el segmento de alto riesgo, el modelo predice con alto grado de confianza
-
-Sin embargo, mantiene limitaciones para **pricing individual**, particularmente en casos outlier (muy joven pero fumador obeso, muy viejo pero BMI normal). El 14% de varianza no explicada refleja ausencia de indicadores clínicos críticos.
+El modelo XGBoost explica el 86% de la variación en costos con un error promedio de $2,652 y RMSE de $4,642. Este RMSE representa el 35% del costo promedio de $13,270, una mejora significativa respecto a regresión lineal (44%). El modelo es suficientemente preciso para estimación de primas por cartera y evaluación de siniestralidad esperada, pero mantiene limitaciones para **pricing individual** en casos outlier. El 14% de varianza no explicada refleja ausencia de indicadores clínicos críticos.
 
 ---
 
@@ -290,114 +303,16 @@ Sin embargo, mantiene limitaciones para **pricing individual**, particularmente 
 1,338 registros limitan la capacidad de generalización. Un modelo productivo requeriría decenas de miles de registros para capturar la variabilidad real de una cartera de seguros.
 
 **2. Variables disponibles**
-El 14% de variación no explicada incluso por XGBoost (1 - R²=0.14) sugiere factores ausentes en el dataset: historial clínico, medicamentos crónicos, cirugías previas, condiciones genéticas. Estas variables son estándar en sistemas de información actuarial.
+El 14% de variación no explicada sugiere factores ausentes en el dataset: historial clínico, medicamentos crónicos, cirugías previas, condiciones genéticas. Estas variables son estándar en sistemas de información actuarial.
 
-**3. Linealidad del modelo**
-La regresión lineal asume relaciones lineales. La variable `smoker` introduce un salto discreto que viola esta suposición estructuralmente; no hay transformación del target que lo resuelva. La solución correcta es un algoritmo no lineal.
-
-**4. Sesgo geográfico**
+**3. Sesgo geográfico**
 Dataset exclusivo del mercado de EE.UU. No transferible directamente a otros sistemas de salud.
 
 ### Trabajo futuro recomendado
 
-- ✅ **XGBoost Regressor implementado:** Mejora de R² de 0.77 a 0.86
-- ✅ **Feature Importance implementado:** Visualización de qué variables impactan más el modelo
-- ✅ **SHAP Values implementado:** Explicabilidad individual de predicciones
-- ✅ **K-Fold Cross-Validation implementado:** Validación robusta con 5 folds
 - Crear la variable de interacción `smoker_obese` (dummy si BMI ≥ 30 y smoker=1) e incorporarla al modelo para mejorar interpretabilidad
-- Evaluar el impacto de incorporar `children` y `region` mediante técnicas de selección de features (permutation importance)
+- Evaluar el impacto de incorporar `children` y `region` mediante permutation importance
 - Comparar XGBoost contra **Random Forest** y **LightGBM** para determinar si hay margen de mejora adicional
-
----
-
-## Análisis de Importancia de Variables y Validación del Modelo
-
-### Importancia de Features (Feature Importance)
-
-XGBoost calcula automáticamente la **importancia de cada variable** midiendo cuánto contribuye a la reducción del error del modelo. La métrica utilizada es **Gain** (ganancia): la reducción promedio de pérdida cuando la variable participa en una división del árbol.
-
-| Variable | Gain (Importancia) | Interpretación |
-|----------|-------------------|----------------|
-| `smoker` | **Alta** | Variable dominante; factor de riesgo más crítico |
-| `age` | **Media** | Correlación con edad, pero subordinada a tabaquismo |
-| `bmi` | **Baja a Media** | Correlación débil; interacción importante con `smoker` |
-
-**Hallazgo clave:** `smoker` es **abrumadoramente importante** — el modelo asigna mayor peso a esta variable que a las otras dos combinadas. Esto alinea con el EDA (correlación de 0.79 de `smoker` con `charges`) y confirma que una compañía aseguradora tiene razón en estructurar su pricing alrededor del estado de fumador.
-
-#### Visualización: Feature Importance por Gain
-
-![Feature Importance — XGBoost Model](images/09_feature_importance.png)
-
-**Interpretación de la gráfica:**
-- **Eje horizontal:** Valor de Gain (reducción de pérdida)
-- **Longitud de las barras:** Mayor longitud = mayor importancia en las decisiones del modelo
-- **`smoker`:** La barra más larga indica que esta variable es la que más reduce el error al hacer divisiones en los árboles
-- **`age` y `bmi`:** Barras significativamente más cortas, sugiriendo contribución secundaria
-
-**Implicación empresarial:** Un algoritmo que predice costos de seguros automáticamente ha aprendido del data histórico que el tabaquismo es el principal predictor. Esto valida la estrategia comercial de diferenciar primas por estado de fumador, independientemente de edad u obesidad.
-
-### Explicabilidad: SHAP Values
-
-**SHAP (SHapley Additive exPlanations)** va más allá de feature importance global — explica **por qué el modelo hizo una predicción específica** para cada cliente.
-
-**Interpretación del gráfico SHAP summary plot:**
-- **X:** Impacto SHAP acumulado en la predicción
-- **Color rojo:** Variable incrementa el costo predicho
-- **Color azul:** Variable disminuye el costo predicho
-
-**Ejemplo de lectura:**
-- Un cliente con `smoker=1` (fumador) tiene ↑ impacto positivo (rojo, desplazado a la derecha) → costo más alto
-- Un cliente con `smoker=0` (no fumador) tiene ↓ impacto negativo (azul, desplazado a la izquierda) → costo más bajo
-- La variabilidad de colores en cada variable muestra cuánto el impacto depende del valor específico
-
-Esta visualización es crítica para **confianza en el modelo**: no solo predice, sino explica por qué.
-
-#### Visualización: SHAP Summary Plot
-
-![SHAP Values — Feature Impact on Model Output](images/10_shap_values.png?t=2026-04-01)
-
-**Interpretación detallada:**
-
-**Eje de cada variable:** Cada fila representa una variable (age, bmi, smoker)
-
-**Eje X:** El valor SHAP muestra el impacto en la predicción final de costos
-- **Valores positivos (derecha):** El valor de esa variable **aumenta** el costo predicho
-- **Valores negativos (izquierda):** El valor de esa variable **disminuye** el costo predicho
-
-**Color de los puntos:** Representa el valor real de la variable (rojo alto, azul bajo)
-
-**Para `smoker`:**
-- Puntos rojos (smoker=1) agrupados a la derecha: Los fumadores incrementan significativamente el costo
-- Puntos azules (smoker=0) agrupados a la izquierda: Los no fumadores reducen el costo
-- **Separación clara entre rojo y azul:** Indica que `smoker` es el factor más importante
-
-**Para `age` y `bmi`:**
-- Nube de puntos menos polarizada: Estos impactos son más distribuidos, menos discriminantes
-- Correlación con edad: A mayor edad, generalmente mayor impacto en costo (pero subordinado a `smoker`)
-
-**Implicación regulatoria:** Este gráfico es crítico para cumplimiento normativo. Si un cliente impugna su prima, la compañía puede mostrar exactamente qué variables impactaron su predicción y por cuánto, demostrando no-discriminación arbitraria.
-
-### Validación Cruzada (K-Fold Cross-Validation)
-
-El split 80/20 es simple pero riesgoso: un único test set puede no ser representativo. Se implementó **5-Fold Cross-Validation** para evaluar el modelo de forma más robusta:
-
-**Proceso:**
-1. Divide el dataset en 5 subconjuntos iguales (folds)
-2. Entrena 5 modelos: cada uno usa 4 folds para entrenar y 1 para validar (rotativo)
-3. Calcula R² para cada fold
-4. Reporta promedio y desviación estándar
-
-**Resultados esperados:**
-- **R² promedio:** ~0.85-0.86 (consistente con la prueba 80/20)
-- **Desviación estándar:** Baja (< 0.05) indica modelo estable y robusto
-
-**Valor:**
-- **Confirma robustez:** Si los 5 R² están próximos entre sí, el modelo generaliza bien. Si varían mucho, indica overfitting o dependencia de ciertos subconjuntos.
-- **Detecta overfitting:** Si R² en entrenamiento >> R² en validación cruzada, hay problema de memorización.
-- **Proporciona intervalo de confianza:** En lugar de "R²=0.86 en test set", obtenemos "R² ∈ [0.82, 0.90] con 95% de confianza", más honesto para decisiones en producción.
-
-**Conexión con GitHub & Reproducibilidad:**
-K-Fold CV es estándar en papers de ML y proyectos científicos de GitHub porque reduce el riesgo de "lucky splits". Un revisor viendo este proyecto sabe inmediatamente que el modelo fue evaluado con rigor, no con suerte estadística.
 
 ---
 
@@ -419,10 +334,10 @@ La transformación logarítmica mejora modelos con distribuciones continuas sesg
 `bmi` y la variable derivada `obese` (BMI ≥ 30) tienen correlación de 0.80. Incluir ambas introduciría multicolinealidad, inflando coeficientes y dificultando la interpretación del modelo. `bmi` fue retenida por mayor contenido de información como variable continua.
 
 **Feature Importance vs. SHAP: Predicción vs. Explicabilidad**
-Feature importance (Gain) responde "qué variables son más importantes globalmente"; SHAP responde "por qué este cliente específico tiene una predicción de $X". XGBoost domina por predictibilidad (R² alto), pero SHAP es crítico para confianza operacional. En finanzas y seguros, la explicabilidad es requisito regulatorio (regulaciones anti-sesgo, prueba de discriminación). Un modelo de caja negra con R²=0.95 es menos valioso que uno con R²=0.86 que puede justificar cada predicción ante un regulador o cliente.
+Feature importance (Gain) responde "qué variables son más importantes globalmente"; SHAP responde "por qué este cliente específico tiene esta predicción". En finanzas y seguros, la explicabilidad no es opcional: es requisito regulatorio. Un modelo con R²=0.86 que puede justificar cada predicción ante un regulador es más valioso que una caja negra con R²=0.95.
 
-**K-Fold Cross-Validation: De la validación teórica a la práctica productiva**
-Dataset pequeño (1,338 registros) hace que un único test set 80/20 sea frágil: 268 muestras puede no ser suficiente para representar la variabilidad real. 5-Fold CV usa 4 × 268 ≈ 1,070 muestras para validación totales, reduciendo la variancia de la estimación. En producción, este intervalo de confianza es más honesto: "el modelo generalizará con R² entre 0.81-0.91 con 95% de confianza" es mejor que "R²=0.86 en test set", que podría ser suerte estadística.
+**K-Fold CV: Validación robusta sobre datasets pequeños**
+Con solo 1,338 registros, un único test set de 268 muestras puede no ser representativo. 5-Fold CV usa todas las muestras para validación en diferentes combinaciones, produciendo un intervalo de confianza más honesto que un solo split.
 
 ---
 
@@ -484,8 +399,8 @@ src/notebooks/03_regression.ipynb
 ```
 
    Al ejecutar los notebooks se generan automáticamente:
-   - `images/`: 8 gráficos en formato PNG
-   - `models/`: 3 artefactos serializados: `standard_scaler.pkl`, `kmeans_risk_segments.pkl`, `linear_regression.pkl`
+   - `images/`: 10 gráficos en formato PNG
+   - `models/`: artefactos serializados: `standard_scaler.pkl`, `kmeans_risk_segments.pkl`, `linear_regression.pkl`
 
 ---
 
@@ -495,6 +410,8 @@ src/notebooks/03_regression.ipynb
 - [Scikit-learn Documentation](https://scikit-learn.org/stable/)
 - [K-Means Clustering - Scikit-learn](https://scikit-learn.org/stable/modules/clustering.html#k-means)
 - [StandardScaler - Scikit-learn](https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.StandardScaler.html)
+- [XGBoost Documentation](https://xgboost.readthedocs.io/en/stable/)
+- [SHAP Documentation](https://shap.readthedocs.io/en/latest/)
 - [Seaborn Statistical Visualization](https://seaborn.pydata.org/)
 
 ---
