@@ -354,7 +354,7 @@ Esta visualización es crítica para **confianza en el modelo**: no solo predice
 
 #### Visualización: SHAP Summary Plot
 
-![SHAP Values — Feature Impact on Model Output](images/10_shap_values.png)
+![SHAP Values — Feature Impact on Model Output](images/10_shap_values.png?t=2026-04-01)
 
 **Interpretación detallada:**
 
