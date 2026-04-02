@@ -416,4 +416,4 @@ src/notebooks/03_regression.ipynb
 
 ---
 
-*Desarrollado por Felipe CH, 2025 | Proyecto académico - Vortex Data Science Program*
+*Desarrollado por Felipe CH, 2026 | Proyecto académico - Vortex Data Science Program*
